@@ -5,7 +5,7 @@ import asyncio
 
 load_dotenv()
 
-from Brain import RTC
+from Brain.RTC import RTC
 
 
 DEFAULT_MODE = "camera"
@@ -20,7 +20,7 @@ if __name__ == "__main__":
         choices=["camera", "screen", "none"],
     )
     args = parser.parse_args()
-    main = RTC.AudioLoop(video_mode=args.mode)
+    main = RTC(video_mode=args.mode)
     asyncio.run(main.run())
 
 
