@@ -4,7 +4,6 @@ import base64
 import io
 import traceback
 
-
 import cv2
 import pyaudio
 import PIL.Image
@@ -14,6 +13,7 @@ from google.genai import types
 
 from Database.prompts import RTC_prompt
 from Brain.deepagent import DeepAgent
+from Brain.RAG import RAG
 
 
 class RTC:
@@ -21,6 +21,7 @@ class RTC:
         self,
         model: str = "models/gemini-2.5-flash-native-audio-preview-12-2025",
         video_mode: str = "camera",
+        session_id: str = "default",
     ):
         self.FORMAT = pyaudio.paInt16
         self.CHANNELS = 1
@@ -31,6 +32,11 @@ class RTC:
         self.model = model
 
         self.video_mode = video_mode
+
+        self.session_id = session_id
+        self.memory = RAG(session_id=self.session_id)
+        self._pending_user_text = ""  # buffer: accumulates user transcription
+        self._pending_assistant_text = ""  # buffer: accumulates assistant transcription
 
         self.client = genai.Client(
             http_options={"api_version": "v1alpha"},
@@ -55,6 +61,21 @@ class RTC:
                 ]
             ),
             types.Tool(google_search=types.GoogleSearch()),
+            types.Tool(
+                function_declarations=[
+                    types.FunctionDeclaration(
+                        name="GetContext",
+                        parameters=genai.types.Schema(
+                            type=genai.types.Type.OBJECT,
+                            properties={
+                                "query": genai.types.Schema(
+                                    type=genai.types.Type.STRING,
+                                ),
+                            },
+                        ),
+                    ),
+                ]
+            ),
         ]
 
         self.CONFIG = types.LiveConnectConfig(
@@ -94,6 +115,37 @@ class RTC:
 
         self.audio_stream = None
         self.deepagent = None
+
+    def build_rag_injection(self, query: str) -> str:
+        """
+        Retrieve relevant past conversation turns from ChromaDB
+        and format them as a context block for the model.
+        """
+        context = self.memory.retrieve_context(query)
+        print(f"[RAG] Retrieved context for query '{query}':\n{context}")
+        if not context:
+            return ""
+        return (
+            "\n\n[MEMORY — relevant past conversation]\n" + context + "\n[END MEMORY]\n"
+        )
+
+    def _flush_turn_to_memory(self):
+        """
+        After a full exchange (user + ATLAS transcriptions collected),
+        save both to ChromaDB and reset buffers.
+        """
+        self.memory.save_exchange(
+            user_text=self._pending_user_text,
+            assistant_text=self._pending_assistant_text,
+        )
+        if self._pending_user_text or self._pending_assistant_text:
+            print(
+                f"[RAG] Saved turn → "
+                f"User: {self._pending_user_text[:60]}... | "
+                f"ATLAS: {self._pending_assistant_text[:60]}..."
+            )
+        self._pending_user_text = ""
+        self._pending_assistant_text = ""
 
     async def send_text(self):
         while True:
@@ -214,10 +266,18 @@ class RTC:
             if fc.name == "DeepAgent":
                 query = fc.args.get("query", "")
                 result = await self.deepagent.query(query)
+            if fc.name == "GetContext":
+                query = fc.args.get("query", "")
+                result = self.build_rag_injection(query)
+            scheduling = (
+                types.FunctionResponseScheduling.INTERRUPT
+                if fc.name == "GetContext"
+                else types.FunctionResponseScheduling.WHEN_IDLE
+            )
             function_response = types.FunctionResponse(
                 id=fc.id,
                 name=fc.name,
-                scheduling=types.FunctionResponseScheduling.WHEN_IDLE,
+                scheduling=scheduling,
                 response={"result": result},
             )
             function_responses.append(function_response)
@@ -232,6 +292,7 @@ class RTC:
                     turn = self.session.receive()
                     input_transcription = ""
                     output_transcription = ""
+
                     async for response in turn:
                         if data := response.data:
                             self.audio_in_queue.put_nowait(data)
@@ -259,6 +320,10 @@ class RTC:
                             )
                     print(f"User: {input_transcription}")
                     print(f"ATLAS: {output_transcription}")
+
+                    self._pending_user_text += (" " + input_transcription).strip()
+                    self._pending_assistant_text += (" " + output_transcription).strip()
+                    self._flush_turn_to_memory()
 
                     while not self.audio_in_queue.empty():
                         self.audio_in_queue.get_nowait()

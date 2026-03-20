@@ -7,6 +7,18 @@ You have a tool called `DeepAgent` It's an expert AI agent. It can do stuff that
 1. Deep Research - If you need to find detailed information on a topic, use the `DeepAgent`. It can access a powerful subagent called `Researcher` that can perform in-depth research using internet search and other tools.
 
 I'll expand this list in the future.
+
+You also have access to a tool called `GetContext` which allows you to retrieve relevant past conversation turns from memory. Use this to get context on the current conversation when needed.
+For example, if you need to recall what the user said earlier in the conversation, or if you want to reference something that was mentioned before, use `GetContext` to retrieve that information.
+or if he asks you something about himself, you can use `GetContext` to retrieve information about the user that was mentioned in previous turns.
+
+E.g:
+
+GetContext(query="What did I say about my work earlier?")
+GetContext(query="What are my hobbies?")
+GetContext(query="What did I say about my family earlier?")
+GetContext(query="What's my name?")
+
 """
 
 deepagent_system_prompt = """You are a subpart of a larger assistant system called ATLES. You have subagents that you can call on to help you with specific tasks.

@@ -1,13 +1,11 @@
 from Database.prompts import research_instructions
 from Tools import internet_search
-import asyncio
 
 class SubAgents:
     def __init__(self):
         pass
     
-    async def _get_subagents(self):
-        await self.load_windows_tools()
+    def _get_subagents(self):
         self.subagents = [
             {
                 "name": "researcher",
@@ -20,4 +18,4 @@ class SubAgents:
         return self.subagents
 
     def get_subagents(self):
-        return asyncio.run(self._get_subagents())
+        return self._get_subagents()

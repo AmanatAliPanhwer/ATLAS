@@ -2,8 +2,10 @@ from dotenv import load_dotenv
 import argparse
 import os
 import asyncio
+import tracemalloc
 
 load_dotenv()
+tracemalloc.start()
 
 from Brain.RTC import RTC
 
