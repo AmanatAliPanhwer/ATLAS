@@ -3,6 +3,8 @@ import asyncio
 import base64
 import io
 import traceback
+import requests
+from fastapi import WebSocket, WebSocketDisconnect
 
 import cv2
 import pyaudio
@@ -15,6 +17,8 @@ from Database.prompts import RTC_prompt
 from Brain.deepagent import DeepAgent
 from Brain.RAG import RAG
 
+from dotenv import load_dotenv
+load_dotenv()
 
 class RTC:
     def __init__(
@@ -115,6 +119,10 @@ class RTC:
 
         self.audio_stream = None
         self.deepagent = None
+        
+        # API communication
+        self.api_url = "http://localhost:3000/{state}"
+        self.current_state = "idle"
 
     def build_rag_injection(self, query: str) -> str:
         """
@@ -128,6 +136,39 @@ class RTC:
         return (
             "\n\n[MEMORY — relevant past conversation]\n" + context + "\n[END MEMORY]\n"
         )
+
+    async def update_frontend_state(self, mode: str) -> None:
+        """
+        Send state update to frontend via API in a separate thread.
+        Non-blocking to prevent interrupting the main audio processing.
+
+        Args:
+            mode: One of 'idle', 'listening', 'thinking', 'speaking'
+        """
+        if mode == self.current_state:
+            return  # No state change, skip API call
+        
+        # Run HTTP request in thread pool to avoid blocking the main async loop
+        await asyncio.to_thread(self._send_state_request, mode)
+    
+    def _send_state_request(self, mode: str) -> None:
+        """
+        Internal method that makes the actual HTTP request.
+        Runs in a separate thread via asyncio.to_thread.
+        """
+        try:
+            response = requests.post(
+                self.api_url.format(state=mode),
+                json={"state": "on"},
+                timeout=2
+            )
+            if response.status_code == 200:
+                self.current_state = mode
+                print(f"[FRONTEND] State updated to: {mode}")
+            else:
+                print(f"[FRONTEND] Failed to update state: {response.status_code}")
+        except requests.exceptions.RequestException as e:
+            print(f"[FRONTEND] API connection error: {e}")
 
     def _flush_turn_to_memory(self):
         """
@@ -251,6 +292,8 @@ class RTC:
             kwargs = {"exception_on_overflow": False}
         else:
             kwargs = {}
+        
+        
         while True:
             data = await asyncio.to_thread(
                 self.audio_stream.read, self.CHUNK_SIZE, **kwargs
@@ -284,7 +327,7 @@ class RTC:
 
         await self.session.send_tool_response(function_responses=function_responses)
 
-    async def receive_audio(self):
+    async def receive_audio(self, websocket: WebSocket):
         "Background task to reads from the websocket and write pcm chunks to the output queue"
         try:
             while True:
@@ -294,8 +337,17 @@ class RTC:
                     output_transcription = ""
 
                     async for response in turn:
+                        
                         if data := response.data:
-                            self.audio_in_queue.put_nowait(data)
+                            b64_audio = base64.b64encode(data).decode('utf-8')
+                            await websocket.send_json({
+                                "serverContent": {
+                                    "modelTurn": {
+                                        "parts": [{"inlineData": {"data": b64_audio, "mimeType": "audio/pcm"}}]
+                                    }
+                                }
+                            })
+                            await self.update_frontend_state("speaking")
                             continue
                         elif response.tool_call:
                             asyncio.create_task(
@@ -304,26 +356,47 @@ class RTC:
                             continue
                         if text := response.text:
                             print(text, end="")
-                        if (
-                            response.server_content
-                            and response.server_content.output_transcription
-                        ):
-                            output_transcription += (
-                                response.server_content.output_transcription.text
-                            )
-                        if (
-                            response.server_content
-                            and response.server_content.input_transcription
-                        ):
-                            input_transcription += (
-                                response.server_content.input_transcription.text
-                            )
+                        
+                        if response.server_content:
+                            if response.server_content.output_transcription:
+                                text = response.server_content.output_transcription.text
+                                await websocket.send_json({
+                                    "serverContent": {
+                                        "outputTranscription": {"text": text}
+                                    }
+                                })
+                                output_transcription += text
+                            if response.server_content.input_transcription:
+                                
+                                text = response.server_content.input_transcription.text
+                                await websocket.send_json({
+                                    "serverContent": {
+                                        "inputTranscription": {"text": text}
+                                    }
+                                })
+                                input_transcription += text
+                            if response.server_content.turn_complete:
+                                await websocket.send_json({
+                                    "serverContent": {
+                                        "turnComplete": True
+                                    }       
+                                })
+                            if response.server_content.interrupted:
+                                await websocket.send_json({
+                                    "serverContent": {
+                                        "interrupted": True
+                                    }       
+                                })
+
                     print(f"User: {input_transcription}")
                     print(f"ATLAS: {output_transcription}")
 
                     self._pending_user_text += (" " + input_transcription).strip()
                     self._pending_assistant_text += (" " + output_transcription).strip()
                     self._flush_turn_to_memory()
+                    
+                    # Return to listening after turn completes (non-blocking)
+                    asyncio.create_task(self.update_frontend_state("idle"))
 
                     while not self.audio_in_queue.empty():
                         self.audio_in_queue.get_nowait()
@@ -353,8 +426,24 @@ class RTC:
             if self.audio_in_queue is not None:
                 bytestream = await self.audio_in_queue.get()
                 await asyncio.to_thread(stream.write, bytestream)
+    
+    async def receive_from_electron(self, websocket: WebSocket):
+        """Reads data from the Electron Microphone/Input"""
+        try:
+            while True:
+                msg = await websocket.receive_json()
+                if msg["type"] == "audio":
+                    raw_audio = base64.b64decode(msg["data"])
+                    await self.session.send(input={"data": raw_audio, "mime_type": "audio/pcm"}, end_of_turn=False)
+                elif msg["type"] == "text":
+                    await self.session.send(input=msg["text"], end_of_turn=True)
+                elif msg["type"] == "video":
+                    raw_video = base64.b64decode(msg["data"])
+                    await self.session.send(input={"data": raw_video, "mime_type": "image/jpeg"}, end_of_turn=False)
+        except WebSocketDisconnect:
+            print("[WS] Electron Disconnected")
 
-    async def run(self):
+    async def run(self, websocket: WebSocket):
         try:
             async with (
                 self.client.aio.live.connect(
@@ -369,16 +458,8 @@ class RTC:
                 self.out_queue = asyncio.Queue(maxsize=5)
 
                 send_text_task = tg.create_task(self.send_text())
-                tg.create_task(self.send_realtime())
-                tg.create_task(self.listen_audio())
-                if self.video_mode == "camera":
-                    tg.create_task(self.get_frames())
-                elif self.video_mode == "screen":
-                    tg.create_task(self.get_screen())
-
-                tg.create_task(self.receive_audio())
-                # tg.create_task(self.receive_text())
-                tg.create_task(self.play_audio())
+                tg.create_task(self.receive_audio(websocket))
+                tg.create_task(self.receive_from_electron(websocket))
 
                 await send_text_task
                 raise asyncio.CancelledError("User requested exit")
@@ -390,5 +471,7 @@ class RTC:
                 self.audio_stream.close()
                 traceback.print_exception(EG)
         finally:
+            # Set state to idle when system shuts down (non-blocking fire-and-forget)
+            asyncio.create_task(self.update_frontend_state("idle"))
             if self.audio_stream is not None:
                 self.audio_stream.close()

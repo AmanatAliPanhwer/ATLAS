@@ -1,0 +1,188 @@
+const information = document.getElementById('info')
+const nodeVersion = document.getElementById('node-version')
+const chromeVersion = document.getElementById('chrome-version')
+const electronVersion = document.getElementById('electron-version')
+
+
+if (nodeVersion) nodeVersion.innerText = window.electronAPI.node()
+if (chromeVersion) chromeVersion.innerText = window.electronAPI.chrome()
+if (electronVersion) electronVersion.innerText = window.electronAPI.electron()
+
+const func = async () => {
+    const response = await window.electronAPI.ping()
+    const element = document.getElementById('ping-response')
+    if (element) element.innerText = response
+}
+
+const btn = document.getElementById('btn')
+if (btn) btn.addEventListener('click', func)
+
+const userInput = document.getElementById('user-input');
+const micBtn = document.getElementById('mic-btn');
+const camBtn = document.getElementById('cam-btn');
+const screenBtn = document.getElementById('screen-btn');
+const chatHistory = document.getElementById('chat-history');
+
+let activeMsgs = { user: null, model: null };
+
+const addChatMessage = (role, text, isStreaming = false) => {
+    if (!chatHistory) return;
+
+    // If we're streaming and already have an active box for this role, update it
+    if (isStreaming && activeMsgs[role]) {
+        const textSpan = activeMsgs[role].querySelector('.text-content');
+        if (textSpan) {
+            // APPEND the new text chunk instead of replacing it
+            textSpan.innerText += text; 
+        }
+    } else {
+        // Create a NEW message box
+        const msgDiv = document.createElement('div');
+        msgDiv.className = `chat-msg ${role}`;
+        msgDiv.innerHTML = `
+            <span class="role">${role === 'user' ? 'YOU' : 'ATLAS'}</span>
+            <span class="text-content">${text}</span>
+        `;
+        chatHistory.appendChild(msgDiv);
+        
+        // If this is the start of a stream, save it as the active one
+        if (isStreaming) {
+            activeMsgs[role] = msgDiv;
+        } else {
+            activeMsgs[role] = null;
+        }
+    }
+
+    chatHistory.scrollTop = chatHistory.scrollHeight;
+    
+    while (chatHistory.children.length > 30) {
+        chatHistory.removeChild(chatHistory.firstChild);
+    }
+};
+
+// Initialize Gemini Client and Media Handler
+const mediaHandler = new MediaHandler();
+
+// Set up the onFrame callback for composited video
+mediaHandler.setOnFrame((frame) => {
+    if (geminiClient.isConnected()) geminiClient.sendVideo(frame);
+});
+
+const handleVideo = async (btn, mode) => {
+    btn.classList.toggle('active');
+    const isActive = btn.classList.contains('active');
+    
+    try {
+        if (isActive) {
+            if (mode === 'cam') await mediaHandler.startCamera();
+            else await mediaHandler.startScreen();
+            console.log(`${mode === 'cam' ? 'Camera' : 'Screen share'} started`);
+        } else {
+            if (mode === 'cam') mediaHandler.stopCamera();
+            else mediaHandler.stopScreen();
+            console.log(`${mode === 'cam' ? 'Camera' : 'Screen share'} stopped`);
+        }
+    } catch (e) {
+        btn.classList.remove('active');
+        console.error(`Failed to start ${mode}:`, e);
+    }
+};
+
+if (camBtn) camBtn.onclick = () => handleVideo(camBtn, 'cam');
+if (screenBtn) screenBtn.onclick = () => handleVideo(screenBtn, 'screen');
+
+const geminiClient = new GeminiClient({
+    wsUrl: `ws://localhost:8000/ws`,
+    onOpen: () => {
+        console.log('Connected to Gemini Live API (Python Backend)');
+    },
+    onMessage: (event) => {
+        const response = JSON.parse(event.data);
+        
+        // 1. Handle Turn Completion or Interruption
+        if (response.serverContent?.turnComplete || response.serverContent?.interrupted) {
+            activeMsgs.user = null;
+            activeMsgs.model = null;
+        }
+
+        // 2. Handle audio and text data from model
+        if (response.serverContent?.modelTurn?.parts) {
+            response.serverContent.modelTurn.parts.forEach(part => {
+                if (part.inlineData?.mimeType?.includes('audio') && part.inlineData.data) {
+                    mediaHandler.playAudioChunk(part.inlineData.data);
+                    if (window.setState) window.setState('speaking');
+                }
+                if (part.text) {
+                    addChatMessage('model', part.text, true);
+                }
+            });
+        }
+
+        // 3. Handle live Transcriptions from Python
+        if (response.serverContent?.outputTranscription?.text) {
+             addChatMessage('model', response.serverContent.outputTranscription.text, true);
+        }
+        
+        if (response.serverContent?.inputTranscription?.text) {
+             addChatMessage('user', response.serverContent.inputTranscription.text, true);
+        }
+    },
+    onClose: () => {
+        console.log('Gemini Live API Connection Closed');
+        if (window.setState) window.setState('idle');
+    },
+    onError: (err) => {
+        console.error('Gemini Live API Error:', err);
+    }
+});
+
+// Connect to the proxy server
+geminiClient.connect();
+
+if (userInput) {
+  userInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && userInput.value.trim() !== '') {
+      const text = userInput.value;
+      console.log('Sending message:', text);
+      
+      if (geminiClient.isConnected()) {
+          geminiClient.sendText(text);
+          addChatMessage('user', text);
+          if (window.setState) window.setState('thinking');
+      }
+      
+      userInput.value = '';
+    }
+  });
+}
+
+if (micBtn) {
+  micBtn.addEventListener('click', async () => {
+    micBtn.classList.toggle('active');
+    const isActive = micBtn.classList.contains('active');
+    
+    if (isActive) {
+        console.log('Microphone: ON');
+        if (window.setState) window.setState('listening');
+        await mediaHandler.startAudio((base64Audio) => {
+            if (geminiClient.isConnected()) {
+                geminiClient.sendAudio(base64Audio);
+            }
+        });
+    } else {
+        console.log('Microphone: OFF');
+        mediaHandler.stopAudio();
+        if (window.setState) window.setState('idle');
+    }
+  });
+}
+
+// Example of receiving an API call (Server mode):
+window.electronAPI.onApiReceived((data) => {
+    console.log('Incoming API call received:', data);
+    // Control ATLAS via external API calls
+    if (data.url == '/idle') { if (window.setState) window.setState('idle') }
+    if (data.url === '/thinking') { if (window.setState) window.setState('thinking') }
+    if (data.url === '/speaking') { if (window.setState) window.setState('speaking') }
+    if (data.url === '/listening') { if (window.setState) window.setState('listening') }
+});
