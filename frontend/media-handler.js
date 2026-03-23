@@ -6,11 +6,11 @@ class MediaHandler {
     this.audioContext = null;
     this.mediaStream = null;
     this.audioWorkletNode = null;
-    
+
     this.camStream = null;
     this.screenStream = null;
     this.videoInterval = null;
-    
+
     this.nextStartTime = 0;
     this.scheduledSources = [];
     this.isRecording = false;
@@ -25,16 +25,18 @@ class MediaHandler {
     this.camVideo = document.createElement("video");
     this.camVideo.autoplay = true;
     this.camVideo.playsinline = true;
-    
+
     this.screenVideo = document.createElement("video");
     this.screenVideo.autoplay = true;
     this.screenVideo.playsinline = true;
+    this._useMainCapture = false;
+    this._screenBitmap = null;
   }
 
   async initializeAudio() {
     if (!this.audioContext) {
       this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
-          sampleRate: 24000
+        sampleRate: 24000
       });
       await this.audioContext.audioWorklet.addModule('./pcm-processor.js');
     }
@@ -78,12 +80,12 @@ class MediaHandler {
   async startCamera() {
     this.camStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
     this.camVideo.srcObject = this.camStream;
-    
+
     const preview = document.getElementById('video-preview');
     const container = document.getElementById('video-preview-container');
     if (preview) preview.srcObject = this.camStream;
     if (container) container.classList.add('on');
-    
+
     this.ensureCaptureInterval();
   }
 
@@ -93,26 +95,42 @@ class MediaHandler {
       this.camStream = null;
       this.camVideo.srcObject = null;
     }
-    
+
     const preview = document.getElementById('video-preview');
     const container = document.getElementById('video-preview-container');
     if (preview) preview.srcObject = null;
     if (container) container.classList.remove('on');
-    
+
     this.checkIntervals();
   }
 
   async startScreen() {
-    this.screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-    this.screenVideo.srcObject = this.screenStream;
-    this.ensureCaptureInterval();
+    try {
+      window.electronAPI.onScreenFrame(async (base64Jpeg) => {
+        // Convert base64 → Blob → ImageBitmap (decoded off main thread, no stutter)
+        const bytes = Uint8Array.from(atob(base64Jpeg), c => c.charCodeAt(0));
+        const blob = new Blob([bytes], { type: 'image/jpeg' });
+        // Revoke old bitmap to free memory
+        if (this._screenBitmap) this._screenBitmap.close();
+        this._screenBitmap = await createImageBitmap(blob);
+      });
+
+      await window.electronAPI.startScreenCapture();
+      this._useMainCapture = true;
+      this.ensureCaptureInterval();
+      console.log('Screen capture started via main process');
+    } catch (e) {
+      console.error('Error starting screen capture:', e);
+      throw e;
+    }
   }
 
   stopScreen() {
-    if (this.screenStream) {
-      this.screenStream.getTracks().forEach(t => t.stop());
-      this.screenStream = null;
-      this.screenVideo.srcObject = null;
+    window.electronAPI.stopScreenCapture();
+    this._useMainCapture = false;
+    if (this._screenBitmap) {
+      this._screenBitmap.close();
+      this._screenBitmap = null;
     }
     this.checkIntervals();
   }
@@ -124,7 +142,7 @@ class MediaHandler {
   }
 
   checkIntervals() {
-    if (!this.camStream && !this.screenStream && this.videoInterval) {
+    if (!this.camStream && !this._useMainCapture && this.videoInterval) {
       clearInterval(this.videoInterval);
       this.videoInterval = null;
     }
@@ -137,32 +155,28 @@ class MediaHandler {
   broadcastFrame() {
     if (!this.onFrameCallback) return;
 
-    // Clear canvas
     this.ctx.fillStyle = "black";
     this.ctx.fillRect(0, 0, this.compositeCanvas.width, this.compositeCanvas.height);
 
-    // If Screen is on, draw it as background
-    if (this.screenStream) {
-      this.ctx.drawImage(this.screenVideo, 0, 0, 1280, 720);
+    // Draw screen from IPC-delivered image (no video element needed)
+    if (this._useMainCapture && this._screenBitmap) {
+      this.ctx.drawImage(this._screenBitmap, 0, 0, 1280, 720);
     }
 
-    // If Camera is on, draw it as PiP (Picture-in-Picture)
+    // Camera as PiP (unchanged)
     if (this.camStream) {
-      const pipW = 320;
-      const pipH = 240;
+      const pipW = 320, pipH = 240;
       const x = 1280 - pipW - 20;
       const y = 720 - pipH - 20;
-      
-      // Draw a border for the PiP
-      this.ctx.strokeStyle = "#f5c736"; // ATLAS Accent
+      this.ctx.strokeStyle = "#f5c736";
       this.ctx.lineWidth = 4;
       this.ctx.strokeRect(x, y, pipW, pipH);
       this.ctx.drawImage(this.camVideo, x, y, pipW, pipH);
     }
 
-    if (this.camStream || this.screenStream) {
-        const base64 = this.compositeCanvas.toDataURL("image/jpeg", 0.6).split(",")[1];
-        this.onFrameCallback(base64);
+    if (this.camStream || this._useMainCapture) {
+      const base64 = this.compositeCanvas.toDataURL("image/jpeg", 0.6).split(",")[1];
+      this.onFrameCallback(base64);
     }
   }
 
