@@ -579,6 +579,59 @@ body {
   font-family: sans-serif;
 }
 
+.connection-pill {
+  position: fixed;
+  top: 38px;
+  right: 38px;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  padding: 10px 20px 10px 16px;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  transition: all 0.5s ease;
+  pointer-events: none;
+}
+
+.connection-pill span {
+  font-family: "Space Mono", monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.15em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.connection-pill.connected {
+  border-color: rgba(245, 199, 54, 0.3);
+  box-shadow: 0 0 20px rgba(245, 199, 54, 0.05);
+}
+
+.connection-pill.connected span {
+  color: var(--accent);
+}
+
+.connection-pill.connected .s-pulse {
+  background: var(--accent);
+  animation: ping-idle 2s ease-out infinite;
+}
+
+.connection-pill.disconnected {
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.connection-pill.disconnected .s-core {
+  background: var(--muted);
+}
+
+.connection-pill.disconnected .s-pulse {
+  display: none;
+}
+
 .think-ring {
   position: fixed;
   inset: 0;

@@ -95,6 +95,7 @@ const geminiClient = new GeminiClient({
     wsUrl: `ws://localhost:8000/ws`,
     onOpen: () => {
         console.log('Connected to Gemini Live API (Python Backend)');
+        updateConnectionStatus(true);
     },
     onMessage: (event) => {
         const response = JSON.parse(event.data);
@@ -130,14 +131,45 @@ const geminiClient = new GeminiClient({
     onClose: () => {
         console.log('Gemini Live API Connection Closed');
         if (window.setState) window.setState('idle');
+        updateConnectionStatus(false);
     },
     onError: (err) => {
         console.error('Gemini Live API Error:', err);
+        updateConnectionStatus(false);
     }
 });
 
+// Connection Status Management
+const connPill = document.getElementById('connection-pill');
+const connText = document.getElementById('connection-text');
+
+function updateConnectionStatus(isConnected) {
+    if (!connPill || !connText) return;
+    
+    if (isConnected) {
+        connPill.classList.remove('disconnected');
+        connPill.classList.add('connected');
+        connText.innerText = 'CONNECTION STABILIZED';
+    } else {
+        connPill.classList.remove('connected');
+        connPill.classList.add('disconnected');
+        connText.innerText = 'DISCONNECTED - RETRYING...';
+    }
+}
+
+// Initial status
+updateConnectionStatus(false);
+
 // Connect to the proxy server
 geminiClient.connect();
+
+// Reconnection loop every 5 seconds
+setInterval(() => {
+    if (!geminiClient.isConnected()) {
+        console.log('Attempting to reconnect...');
+        geminiClient.connect();
+    }
+}, 5000);
 
 if (userInput) {
   userInput.addEventListener('keydown', (e) => {
