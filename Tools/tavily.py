@@ -4,7 +4,6 @@ from tavily import TavilyClient
 tavily_client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
 
 def internet_search(
-        self,
         query: str,
         max_results: int = 5,
         topic: Literal["general", "news", "finance"] = "general",

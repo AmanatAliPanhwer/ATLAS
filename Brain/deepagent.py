@@ -33,7 +33,6 @@ class DeepAgent:
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "text":
                         return f"Result: {block['text']}"
-
             return f"Result: {str(content)}"
 
         except Exception as e:

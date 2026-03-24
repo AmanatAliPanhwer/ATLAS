@@ -1,14 +1,11 @@
 import os
 import asyncio
 import base64
-import io
 import traceback
 import requests
 from fastapi import WebSocket, WebSocketDisconnect
 
-import cv2
 import pyaudio
-import PIL.Image
 
 from google import genai
 from google.genai import types
@@ -121,7 +118,7 @@ class RTC:
         self.deepagent = None
         
         # API communication
-        self.api_url = "http://localhost:3000/{state}"
+        self.api_url = f"{os.environ.get('API_URL')}/{{state}}"
         self.current_state = "idle"
 
     def build_rag_injection(self, query: str) -> str:
@@ -198,108 +195,6 @@ class RTC:
                 break
             if self.session is not None:
                 await self.session.send(input=text or ".", end_of_turn=True)
-
-    def _get_frame(self, cap):
-        # Read the frameq
-        ret, frame = cap.read()
-        # Check if the frame was read successfully
-        if not ret:
-            return None
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        img = PIL.Image.fromarray(frame_rgb)
-        img.thumbnail([1024, 1024])
-
-        image_io = io.BytesIO()
-        img.save(image_io, format="jpeg")
-        image_io.seek(0)
-
-        mime_type = "image/jpeg"
-        image_bytes = image_io.read()
-        return {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}
-
-    async def get_frames(self):
-
-        cap = await asyncio.to_thread(
-            cv2.VideoCapture, 0
-        )  # 0 represents the default camera
-
-        while True:
-            frame = await asyncio.to_thread(self._get_frame, cap)
-            if frame is None:
-                break
-
-            await asyncio.sleep(1.0)
-
-            if self.out_queue is not None:
-                await self.out_queue.put(frame)
-
-        # Release the VideoCapture object
-        cap.release()
-
-    def _get_screen(self):
-        try:
-            import mss  # pytype: disable=import-error # pylint: disable=g-import-not-at-top
-        except ImportError as e:
-            raise ImportError(
-                "Please install mss package using 'pip install mss'"
-            ) from e
-        sct = mss.mss()
-        monitor = sct.monitors[0]
-
-        i = sct.grab(monitor)
-
-        mime_type = "image/jpeg"
-        image_bytes = mss.tools.to_png(i.rgb, i.size)
-        img = PIL.Image.open(io.BytesIO(image_bytes))
-
-        image_io = io.BytesIO()
-        img.save(image_io, format="jpeg")
-        image_io.seek(0)
-
-        image_bytes = image_io.read()
-        return {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}
-
-    async def get_screen(self):
-        while True:
-            frame = await asyncio.to_thread(self._get_screen)
-            if frame is None:
-                break
-
-            await asyncio.sleep(1.0)
-
-            if self.out_queue is not None:
-                await self.out_queue.put(frame)
-
-    async def send_realtime(self):
-        while True:
-            if self.out_queue is not None:
-                msg = await self.out_queue.get()
-                if self.session is not None:
-                    await self.session.send(input=msg)
-
-    async def listen_audio(self):
-        mic_info = self.pya.get_default_input_device_info()
-        self.audio_stream = await asyncio.to_thread(
-            self.pya.open,
-            format=self.FORMAT,
-            channels=self.CHANNELS,
-            rate=self.SEND_SAMPLE_RATE,
-            input=True,
-            input_device_index=mic_info["index"],
-            frames_per_buffer=self.CHUNK_SIZE,
-        )
-        if __debug__:
-            kwargs = {"exception_on_overflow": False}
-        else:
-            kwargs = {}
-        
-        
-        while True:
-            data = await asyncio.to_thread(
-                self.audio_stream.read, self.CHUNK_SIZE, **kwargs
-            )
-            if self.out_queue is not None:
-                await self.out_queue.put({"data": data, "mime_type": "audio/pcm"})
 
     async def _hendle_tool_calls(self, tool_call):
         print("The tool was called")
@@ -404,29 +299,6 @@ class RTC:
         except Exception as e:
             print(e)
 
-    async def receive_text(self):
-        while True:
-            async for response in self.session.receive():
-                if response.server_content.model_turn:
-                    print("Model turn:", response.server_content.model_turn)
-                if response.server_content.output_transcription:
-                    print(
-                        "Transcript:", response.server_content.output_transcription.text
-                    )
-
-    async def play_audio(self):
-        stream = await asyncio.to_thread(
-            self.pya.open,
-            format=self.FORMAT,
-            channels=self.CHANNELS,
-            rate=self.RECEIVE_SAMPLE_RATE,
-            output=True,
-        )
-        while True:
-            if self.audio_in_queue is not None:
-                bytestream = await self.audio_in_queue.get()
-                await asyncio.to_thread(stream.write, bytestream)
-    
     async def receive_from_electron(self, websocket: WebSocket):
         """Reads data from the Electron Microphone/Input"""
         try:

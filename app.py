@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 import tracemalloc
 import subprocess
 
-load_dotenv('.env')
+load_dotenv()
 tracemalloc.start()
 
 app = FastAPI()

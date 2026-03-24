@@ -115,8 +115,27 @@ const geminiClient = new GeminiClient({
                 }
                 if (part.text) {
                     addChatMessage('model', part.text, true);
+                    
+                    // 1. Check for single image pattern [IMAGE: URL]
+                    const imgMatch = part.text.match(/\[IMAGE:\s*(https?:\/\/[^\]\s,]+)\]/i);
+                    if (imgMatch && imgMatch[1]) {
+                        showImage(imgMatch[1]);
+                    }
+
+                    // 2. Check for multiple images pattern [IMAGES: JSON_ARRAY_OR_OBJ]
+                    const imgsMatch = part.text.match(/\[IMAGES:\s*(\{.*\})\]/i) || part.text.match(/\[IMAGES:\s*(\[.*\])\]/i);
+                    if (imgsMatch && imgsMatch[1]) {
+                        try {
+                            const data = JSON.parse(imgsMatch[1]);
+                            showImage(data);
+                        } catch (e) {
+                            console.error('Failed to parse IMAGES JSON:', e);
+                        }
+                    }
                 }
+
             });
+
         }
 
         // 3. Handle live Transcriptions from Python
@@ -159,6 +178,13 @@ function updateConnectionStatus(isConnected) {
 
 // Initial status
 updateConnectionStatus(false);
+
+
+/**
+ * Application Core Logic
+ */
+
+
 
 // Connect to the proxy server
 geminiClient.connect();
@@ -217,4 +243,20 @@ window.electronAPI.onApiReceived((data) => {
     if (data.url === '/thinking') { if (window.setState) window.setState('thinking') }
     if (data.url === '/speaking') { if (window.setState) window.setState('speaking') }
     if (data.url === '/listening') { if (window.setState) window.setState('listening') }
+    
+    // Image widget control via API
+    if (data.url === '/show-image') {
+        console.log('API call to show image with params:', data.params);
+        body = JSON.parse(data.body)
+        if (body.params) {
+            // Check if it's a simple URL or a complex object
+            if (body.params.url || body.params.images || Array.isArray(body.params)) {
+                showImage(body.params);
+            }
+        }
+    }
+
+    if (data.url === '/hide-image') {
+        hideImage();
+    }
 });
